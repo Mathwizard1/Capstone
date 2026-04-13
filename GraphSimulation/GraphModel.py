@@ -67,7 +67,7 @@ class TripartiteGraph(Entity):
         if inode:
             partner = self.strategy.select_partner(self, self.right_memory[inode.id])
             if partner: 
-                self.match(lnode, inode, partner)
+                self.match(lnode, inode, partner) # type: ignore
         elif discard_node:
             for inode_id in lnode.candidate_Inodes:
                 self.left_memory[inode_id].remove(lnode)
@@ -78,7 +78,7 @@ class TripartiteGraph(Entity):
         if inode:
             partner = self.strategy.select_partner(self, self.left_memory[inode.id])
             if partner: 
-                self.match(partner, inode, rnode)
+                self.match(partner, inode, rnode) # type: ignore
         elif discard_node:
             for inode_id in rnode.candidate_Inodes:
                 self.right_memory[inode_id].remove(rnode)

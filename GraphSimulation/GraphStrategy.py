@@ -24,7 +24,9 @@ class MatchingStrategy(ABC):
     def select_inode_for_R(self, graph: TripartiteGraph, rnode: RNode) -> INode | None: pass
 
     def select_partner(self, graph: TripartiteGraph, nodes: set[varNode]):
-        pass
+        if not nodes:
+            return None
+        return next(iter(nodes))
 
 class GreedyStrategy(MatchingStrategy):
     def select_inode_sub_optimal(self, graph, node) -> INode | None:
@@ -89,7 +91,7 @@ class RankStrategy(MatchingStrategy):
 
         for inode_id in rnode.candidate_Inodes:
             inode = graph.Inodes[inode_id]
-            if inode.available and graph.right_memory[inode_id]:
+            if inode.available and graph.left_memory[inode_id]:
                 if inode.rank < best_rank:
                     best_rank = inode.rank
                     best = inode
