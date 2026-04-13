@@ -59,3 +59,7 @@ class INode(Node):
 
     def __str__(self) -> str:
         return f"INode(id:{self.id})\n"
+    
+    def reset(self):
+        self.connection = None
+        self.available = True

@@ -70,9 +70,10 @@ class TripartiteGraph(Entity):
                 self.match(lnode, inode, partner) # type: ignore
         elif discard_node:
             for inode_id in lnode.candidate_Inodes:
-                self.left_memory[inode_id].remove(lnode)
+                if(inode_id in self.left_memory):
+                    self.left_memory[inode_id].discard(lnode)
 
-    def process_Rnode(self, rnode: RNode, discard_node=True):
+    def process_Rnode(self, rnode: RNode, discard_node):
         inode = self.strategy.select_inode_for_R(self, rnode)
 
         if inode:
@@ -81,7 +82,8 @@ class TripartiteGraph(Entity):
                 self.match(partner, inode, rnode) # type: ignore
         elif discard_node:
             for inode_id in rnode.candidate_Inodes:
-                self.right_memory[inode_id].remove(rnode)
+                if(inode_id in self.right_memory):
+                    self.right_memory[inode_id].discard(rnode)
 
     def match(self, lnode: LNode, inode: INode, rnode: RNode):
         lnode.connected_Inode = inode
@@ -107,5 +109,23 @@ class TripartiteGraph(Entity):
 
     def compute_competitive_ratio(self, opt):
         return self.matches / opt
+
+    def reset(self):
+        # Reset matching stats
+        self.matches = 0    
+
+        # Reset memory
+        self.left_memory.clear()
+        self.right_memory.clear()
+
+        # Reset inode state and memory
+        for inode in self.Inodes.values():
+            inode.reset()
+
+            self.left_memory[inode.id] = set()
+            self.right_memory[inode.id] = set() 
+
+        # Reinitialize strategy-specific state
+        self.strategy.process_graph(self)
 
 from .GraphStrategy import MatchingStrategy

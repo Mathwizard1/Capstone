@@ -12,6 +12,9 @@ from .utils import RND_GEN
 # Matching Strategy Class
 
 class MatchingStrategy(ABC):
+    def __init__(self, name = "MatchingStrategy") -> None:
+        self.name = name
+
     def process_graph(self, graph: TripartiteGraph): pass
 
     @abstractmethod 
@@ -29,6 +32,9 @@ class MatchingStrategy(ABC):
         return next(iter(nodes))
 
 class GreedyStrategy(MatchingStrategy):
+    def __init__(self, name= "GreedyStrategy") -> None:
+        super().__init__(name)
+    
     def select_inode_sub_optimal(self, graph, node) -> INode | None:
         # Sub Optimal
         for inode_id in node.candidate_Inodes:
@@ -56,6 +62,9 @@ class GreedyStrategy(MatchingStrategy):
         return self.select_inode_sub_optimal(graph, rnode)
 
 class RankStrategy(MatchingStrategy):
+    def __init__(self, name= "RankStrategy") -> None:
+        super().__init__(name)
+
     def process_graph(self, graph):
         for inode in graph.Inodes.values():
             inode.rank = RND_GEN.random()
