@@ -9,6 +9,10 @@ from .GraphStrategy import (
     GreedyStrategy, RankStrategy
 )
 
+from .GraphAIStrategy import (
+    TimeSeriesStrategy
+)
+
 from .GraphModel import TripartiteGraph
 
 __all__ = [
@@ -21,5 +25,7 @@ __all__ = [
     "GreedyStrategy", 
     "RankStrategy",
 
+    "TimeSeriesStrategy",
+    
     "TripartiteGraph",
 ]
