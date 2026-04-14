@@ -126,6 +126,6 @@ class TripartiteGraph(Entity):
             self.right_memory[inode.id] = set() 
 
         # Reinitialize strategy-specific state
-        self.strategy.process_graph(self)
+        #self.strategy.process_graph(self)
 
 from .GraphStrategy import MatchingStrategy
