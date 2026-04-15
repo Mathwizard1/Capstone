@@ -36,6 +36,37 @@ class MatchingStrategy(ABC):
             return None
         return next(iter(nodes))
 
+class RandomStrategy(MatchingStrategy):
+    def __init__(self, name="RandomStrategy") -> None:
+        super().__init__(name)
+
+    def _get_random_available_inode(self, graph: TripartiteGraph, node: varNode) -> INode | None:
+        available_candidates = []
+        
+        for inode_id in node.candidate_Inodes:
+            inode = graph.Inodes[inode_id]
+            if inode.available:
+                available_candidates.append(inode)
+
+        # if no candidates are free
+        if not available_candidates: return None
+        idx = RND_GEN.integers(len(available_candidates))
+        return available_candidates[idx]
+
+    def select_inode_for_L(self, graph, lnode):
+        return self._get_random_available_inode(graph, lnode)
+
+    def select_inode_for_R(self, graph, rnode):
+        return self._get_random_available_inode(graph, rnode)
+
+    def select_partner(self, graph, nodes: set[varNode]):
+        if not nodes:
+            return None
+
+        node_tuple = tuple(nodes)
+        idx = RND_GEN.integers(len(node_tuple))
+        return node_tuple[idx]
+
 class GreedyStrategy(MatchingStrategy):
     def __init__(self, name= "GreedyStrategy") -> None:
         super().__init__(name)

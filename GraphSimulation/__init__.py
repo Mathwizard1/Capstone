@@ -6,7 +6,13 @@ from .Nodes import (
 
 from .GraphStrategy import (
     MatchingStrategy,
-    GreedyStrategy, RankStrategy
+    RandomStrategy,
+    GreedyStrategy, 
+    RankStrategy
+)
+
+from .GraphAIStrategy import (
+    TimeSeriesStrategy
 )
 
 from .GraphModel import TripartiteGraph
@@ -18,8 +24,11 @@ __all__ = [
     "RNode",
 
     "MatchingStrategy",
+    "RandomStrategy",
     "GreedyStrategy", 
     "RankStrategy",
 
+    "TimeSeriesStrategy",
+    
     "TripartiteGraph",
 ]

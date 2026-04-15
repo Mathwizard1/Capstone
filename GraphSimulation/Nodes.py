@@ -9,10 +9,12 @@ _Node_counter = count()
 def _get_next_id():
     return next(_Node_counter)
 
+from torch import Tensor
+
 class Entity:
     def __init__(self) -> None:
-        self.feature = None
-        self.weight = None
+        self.embedding: Tensor|None = None
+        self.weight: Tensor|None = None
 
         self.rank = 0.0
 
