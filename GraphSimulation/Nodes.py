@@ -42,6 +42,16 @@ class varNode(Node):
         string = f"{self.node_type}Node(id:{self.id} online_time:{self.online_time})\n"
         return string
 
+    def __lt__(self, other):
+        if not isinstance(other, varNode):
+            return NotImplemented
+        return self.online_time < other.online_time
+    
+    def __gt__(self, other):
+        if not isinstance(other, varNode):
+            return NotImplemented
+        return self.online_time > other.online_time
+
 # Main Node classes
 
 class LNode(varNode):
