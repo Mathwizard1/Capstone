@@ -12,7 +12,12 @@ from .GraphStrategy import (
 )
 
 from .GraphAIStrategy import (
+    SupervisedStrategy,
     TimeSeriesStrategy
+)
+
+from .GraphAITrainer import (
+    TripartiteGraphTrainer
 )
 
 from .GraphModel import TripartiteGraph
@@ -28,6 +33,9 @@ __all__ = [
     "GreedyStrategy", 
     "RankStrategy",
 
+    "TripartiteGraphTrainer",
+
+    "SupervisedStrategy",
     "TimeSeriesStrategy",
     
     "TripartiteGraph",
