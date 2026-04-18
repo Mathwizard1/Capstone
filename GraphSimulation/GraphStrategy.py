@@ -12,10 +12,12 @@ from .utils import RND_GEN
 # Matching Strategy Class
 
 class MatchingStrategy(ABC):
-    def __init__(self, name = "MatchingStrategy") -> None:
+    def __init__(self, name = "MatchingStrategy", deterministic_partner= True) -> None:
         self.name = name
+        self.deterministic_partner = deterministic_partner
 
-    def process_graph(self, graph: TripartiteGraph): pass
+    def process_graph(self, graph: TripartiteGraph): 
+        pass
 
     def select_inode_sub_optimal(self, graph: TripartiteGraph, inode_ids: tuple[int, ...]) -> INode | None:
         # Sub Optimal
@@ -26,19 +28,22 @@ class MatchingStrategy(ABC):
         return None
 
     @abstractmethod
-    def select_inode_for_L(self, graph: TripartiteGraph, lnode: LNode) -> INode | None: pass
+    def select_inode_for_L(self, graph: TripartiteGraph, lnode: LNode) -> INode | None: ...
 
     @abstractmethod
-    def select_inode_for_R(self, graph: TripartiteGraph, rnode: RNode) -> INode | None: pass
+    def select_inode_for_R(self, graph: TripartiteGraph, rnode: RNode) -> INode | None: ...
 
     def select_partner(self, graph: TripartiteGraph, nodes: set[varNode]):
         if not nodes:
             return None
-        return next(iter(nodes))
+        return next(iter(sorted(nodes)))
+
+    def reset(self, graph:TripartiteGraph):
+        pass
 
 class RandomStrategy(MatchingStrategy):
-    def __init__(self, name="RandomStrategy") -> None:
-        super().__init__(name)
+    def __init__(self, name="RandomStrategy", deterministic_partner=False) -> None:
+        super().__init__(name, deterministic_partner)
 
     def _get_random_available_inode(self, graph: TripartiteGraph, node: varNode) -> INode | None:
         available_candidates = []
@@ -60,6 +65,9 @@ class RandomStrategy(MatchingStrategy):
         return self._get_random_available_inode(graph, rnode)
 
     def select_partner(self, graph, nodes: set[varNode]):
+        if(self.deterministic_partner):
+            return super().select_partner(graph, nodes)
+
         if not nodes:
             return None
 
@@ -68,8 +76,8 @@ class RandomStrategy(MatchingStrategy):
         return node_tuple[idx]
 
 class GreedyStrategy(MatchingStrategy):
-    def __init__(self, name= "GreedyStrategy") -> None:
-        super().__init__(name)
+    def __init__(self, name="GreedyStrategy",) -> None:
+        super().__init__(name, True)
 
     def select_inode_for_L(self, graph, lnode):
         # Optimal with R connected
@@ -88,8 +96,8 @@ class GreedyStrategy(MatchingStrategy):
         return None
 
 class RankStrategy(MatchingStrategy):
-    def __init__(self, name= "RankStrategy") -> None:
-        super().__init__(name)
+    def __init__(self, name= "RankStrategy", deterministic_partner= False) -> None:
+        super().__init__(name, deterministic_partner)
 
     def process_graph(self, graph):
         for inode in graph.Inodes.values():
@@ -138,6 +146,9 @@ class RankStrategy(MatchingStrategy):
         return None # Case 1 -> Wait
 
     def select_partner(self, graph, nodes):
+        if(self.deterministic_partner):
+            return super().select_partner(graph, nodes)
+
         if not nodes: return None
 
         nodes = tuple(nodes)
