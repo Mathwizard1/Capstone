@@ -3,6 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 from GraphSimulation.GraphModel import TripartiteGraph
+from GraphSimulation.utils import DEVICE
 
 from .Nodes import (
     varNode,
@@ -11,7 +12,7 @@ from .Nodes import (
 
 import os.path as path
 
-from .utils import RND_GEN
+from .utils import RND_GEN, DEVICE, DTYPE
 
 from .GraphStrategy import MatchingStrategy
 
@@ -30,8 +31,6 @@ from torch import (
     full,
     zeros,
 )
-
-from .utils import DEVICE, DTYPE
 
 from torch import save as torch_save
 from torch import load as torch_load
@@ -119,16 +118,33 @@ class MLPStrategy(BaseAIStrategy):
         self.device = device
 
         self.inode_embed_table: nn.Embedding = None # type: ignore
-        self.action_embed: Tensor = None            # type: ignore
         self.base_mask: Tensor = None               # type: ignore
 
         # Encode edge features
         self.edge_encoder = nn.Sequential(
-            nn.Linear(3 + 3, hidden_dim),
+            nn.Linear(4, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
 
             nn.Linear(hidden_dim, embed_dim),
+        )
+
+        # Encode inode features
+        self.inode_encoder = nn.Sequential(
+            nn.Linear(6, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+
+            nn.Linear(hidden_dim, embed_dim),
+        )
+        self.inode_gamma = nn.Parameter(zeros(1))
+        self.tanh = nn.Tanh()
+
+        # Global Projection layer
+        self.global_projection = nn.Sequential(
+            nn.Linear(4, self.embed_dim),
+            nn.LayerNorm(self.embed_dim),
+            nn.ReLU()
         )
 
         # Build query from aggregated edge info
@@ -151,40 +167,33 @@ class MLPStrategy(BaseAIStrategy):
 
         for idx, inode in enumerate(graph.Inodes.values()):
             inode.embedding = self.inode_embed_table.weight[idx]
-
-        inode_embeds = self.inode_embed_table.weight
-        self.action_embed = cat([inode_embeds, self.wait_token.unsqueeze(0)], dim=0)
         
         self.base_mask = full((self.actions + 1,), -float('inf'), device=self.device, requires_grad=False)
 
     def update_state(self, graph: TripartiteGraph, node: varNode):
-        edge_feature = []
+        graph_state = graph.get_state(node)
 
-        for inode_id in node.candidate_Inodes:
-            inode = graph.Inodes[inode_id]
-            left_cnt = len(graph.left_memory[inode_id]) if inode.available else -1
-            right_cnt = len(graph.right_memory[inode_id]) if inode.available else -1
-            edge_feature.append([
-                0.0 if node.node_type == 'L' else 1.0,
-                float(node.online_time),
-                float(len(node.candidate_Inodes)),
-                float(left_cnt),
-                float(right_cnt),
-                float(inode.state),
-            ])
-        edge_tensors = as_tensor(edge_feature, device=self.device)
-        node_embeddings = self.edge_encoder(edge_tensors).mean(dim= 0)
-        return node_embeddings
+        edge_feat = as_tensor(graph_state['edge'], device=self.device)           # (N, 4)
+        inode_feat = as_tensor(graph_state['inode'], device=self.device)         # (N, 6)
+        global_feat = as_tensor(graph_state['global'], device=self.device)     # (4,)
+
+        edge_embed = self.edge_encoder(edge_feat)        # (N, E)
+        inode_embed = self.inode_encoder(inode_feat)     # (N, E)
+        global_proj = self.global_projection(global_feat)
+
+        context = edge_embed.mean(dim=0)            # (E,)
+
+        return context, inode_embed, global_proj
 
     def _get_inode_scores(self, graph: TripartiteGraph, node: varNode):
-        node_embed = self.update_state(graph, node)
+        context, inode_embed, global_proj = self.update_state(graph, node)
 
         # Build query
-        query = self.query_net(node_embed)
+        query_input = context + global_proj
+        query = self.query_net(query_input)
 
         # Mask invalid actions
         mask = self.base_mask.clone()
-        mask.fill_(-float('inf'))
         
         candidate_set = set(node.candidate_Inodes)
         for idx, inode_id in enumerate(self.action_map):
@@ -194,33 +203,28 @@ class MLPStrategy(BaseAIStrategy):
         # WAIT always valid
         mask[self.actions] = 0.0
 
-        scores = (self.action_embed * query.unsqueeze(0)).sum(dim=1)
+        agg_inode_embed = self.inode_embed_table.weight + self.tanh(self.inode_gamma * inode_embed)
+        action_embed = cat([agg_inode_embed, self.wait_token.unsqueeze(0)], dim= 0)
+
+        scores = (action_embed * query.unsqueeze(0)).sum(dim=1)
         scores = scores + mask
 
         return scores
 
-class ResidualMLPStrategy(BaseAIStrategy):
+class ResidualMLPStrategy(MLPStrategy):
     def __init__(self,
                  hidden_dim=64,
                  embed_dim= 32,
                  block_dim= 16,
                  device=DEVICE,
                  name="ResidualMLPStrategy"):
-        super().__init__(name, True, False)
+        super().__init__(hidden_dim, embed_dim, device, name)
 
-        self.hidden_dim = hidden_dim
-        self.embed_dim = embed_dim
         self.block_dim = block_dim
-
-        self.device = device
-
-        self.inode_embed_table: nn.Embedding = None     # type: ignore
-        self.action_embed: Tensor = None                # type: ignore
-        self.base_mask: Tensor = None                   # type: ignore
 
         # Encode edge features
         self.edge_encoder = nn.Sequential(
-            nn.Linear(3 + 3, hidden_dim),
+            nn.Linear(4, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
         )
@@ -241,9 +245,6 @@ class ResidualMLPStrategy(BaseAIStrategy):
         self.query_residual = self._residual_block(hidden_dim, embed_dim)
         self.query_gamma = nn.Parameter(zeros(1))
 
-        # WAIT token (learnable)
-        self.wait_token = nn.Parameter(zeros(embed_dim))
-
     def _residual_block(self, input_dim, output_dim):
         return nn.Sequential(
             nn.LayerNorm(input_dim),
@@ -254,63 +255,54 @@ class ResidualMLPStrategy(BaseAIStrategy):
             nn.SiLU(),
             nn.Linear(self.block_dim, output_dim))
 
-    def process_graph(self, graph: TripartiteGraph):
-        self.actions = len(graph.Inodes)
-        self.action_map = tuple(graph.Inodes)
-
-        self.inode_embed_table = nn.Embedding(self.actions, self.embed_dim, device=self.device)
-        for idx, inode in enumerate(graph.Inodes.values()):
-            inode.embedding = self.inode_embed_table.weight[idx]
-
-        inode_embeds = self.inode_embed_table.weight
-        self.action_embed = cat([inode_embeds, self.wait_token.unsqueeze(0)], dim=0)
-
-        self.base_mask = full((self.actions + 1,), -float('inf'), device=self.device, requires_grad=False)
-
     def update_state(self, graph: TripartiteGraph, node: varNode):
-        edge_feature = []
-        for inode_id in node.candidate_Inodes:
-            inode = graph.Inodes[inode_id]
-            left_cnt = len(graph.left_memory[inode_id]) if inode.available else -1
-            right_cnt = len(graph.right_memory[inode_id]) if inode.available else -1
-            edge_feature.append([
-                0.0 if node.node_type == 'L' else 1.0,
-                float(node.online_time),
-                float(len(node.candidate_Inodes)),
-                float(left_cnt),
-                float(right_cnt),
-                float(inode.state),
-            ])
-        edge_tensors = as_tensor(edge_feature, device=self.device)
-        node_embedding = self.edge_encoder(edge_tensors).mean(dim=0)
+        graph_state = graph.get_state(node)
 
-        final_embedding = self.edge_layer(node_embedding) + self.edge_gamma * self.edge_residual(node_embedding)
-        return final_embedding
+        edge_feat = as_tensor(graph_state['edge'], device=self.device)           # (N, 4)
+        inode_feat = as_tensor(graph_state['inode'], device=self.device)         # (N, 6)
+        global_feat = as_tensor(graph_state['global'], device=self.device)       # (4,)
+
+        edge_embed = self.edge_encoder(edge_feat)        # (N, E)
+        inode_embed = self.inode_encoder(inode_feat)     # (N, E)
+        global_proj = self.global_projection(global_feat)
+
+        context = edge_embed.mean(dim=0)            # (E,)
+        residual_context = self.edge_layer(context) + self.tanh(self.edge_gamma * self.edge_residual(context))
+
+        return residual_context, inode_embed, global_proj
 
     def _get_inode_scores(self, graph: TripartiteGraph, node: varNode):
-        node_embed = self.update_state(graph, node)
-        node_query = self.query_net(node_embed)  
-        
-        # residual MLP transforms the query
-        query = self.query_layer(node_query) + self.query_gamma * self.query_residual(node_query)
+        context, inode_embed, global_proj = self.update_state(graph, node)
 
+        # Build query
+        query_input = context + global_proj
+        pre_query = self.query_net(query_input)
+        query = self.query_layer(pre_query) + self.tanh(self.query_gamma * self.query_residual(pre_query))
+
+        # Mask invalid actions
         mask = self.base_mask.clone()
+        
         candidate_set = set(node.candidate_Inodes)
         for idx, inode_id in enumerate(self.action_map):
             inode = graph.Inodes[inode_id]
             if inode.available and inode_id in candidate_set:
                 mask[idx] = 0.0
-        mask[self.actions] = 0.0  # WAIT always valid
+        # WAIT always valid
+        mask[self.actions] = 0.0
 
-        scores = (self.action_embed * query.unsqueeze(0)).sum(dim=1)
+        agg_inode_embed = self.inode_embed_table.weight + self.tanh(self.inode_gamma * inode_embed)
+        action_embed = cat([agg_inode_embed, self.wait_token.unsqueeze(0)], dim= 0)
+
+        scores = (action_embed * query.unsqueeze(0)).sum(dim=1)
         scores = scores + mask
+
         return scores
 
 class CNNStrategy(BaseAIStrategy):
     def __init__(self,
-                 embed_dim= 32,
-                 hidden_channels= 16,
-                 num_conv_layers= 2,
+                 embed_dim=32,
+                 hidden_channels=16,
+                 num_conv_layers=2,
                  device=DEVICE,
                  name="CNNStrategy"):
         super().__init__(name, True, False)
@@ -325,131 +317,132 @@ class CNNStrategy(BaseAIStrategy):
 
         # Additional auxiliary features per INode 
         # (varNode.node_type, varNode.node_type, inode in varNode.candidate, 
-        # left_count, right_count, available)
-        self.wait_aux = as_tensor([0.5, 0.0, 1.0, -1.0, -1.0, 1.0])  # WAIT is always available
+        # left_count, right_count, balance, congestion)
+        self.wait_aux = as_tensor([0.5, 0.0, 1.0, -1.0, -1.0, 0.0, -2.0])
 
         conv_layers = []
         in_ch = self.embed_dim + self.wait_aux.size(0)
+
         for i in range(num_conv_layers):
             out_ch = hidden_channels if i < num_conv_layers - 1 else 1
-            conv_layers.append(
-                nn.Conv1d(in_channels=in_ch, out_channels=out_ch,
-                          kernel_size=1, padding="same"))
-            
+            conv_layers.append(nn.Conv1d(in_ch, out_ch, kernel_size=1))
+
             if i < num_conv_layers - 1:
                 conv_layers.append(nn.BatchNorm1d(out_ch))
                 conv_layers.append(nn.SiLU())
+
             in_ch = out_ch
         self.conv_net = nn.Sequential(*conv_layers)
 
+        self.inode_encoder = nn.Sequential(
+            nn.Linear(6, embed_dim),
+            nn.LayerNorm(embed_dim),
+            nn.ReLU()
+        )
+
+        self.inode_gamma = nn.Parameter(zeros(1))
+        self.tanh = nn.Tanh()
+
         # Learnable WAIT token embedding (will be concatenated with its auxiliary features)
-        self.wait_embed = nn.Parameter(zeros(embed_dim))
+        self.wait_embed = nn.Parameter(zeros(self.embed_dim))
+        self.wait_token = cat([self.wait_embed.unsqueeze(0), self.wait_aux.unsqueeze(0)], dim=1)
 
     def process_graph(self, graph: TripartiteGraph):
         self.actions = len(graph.Inodes)
         self.action_map = tuple(graph.Inodes)
 
         self.inode_embed_table = nn.Embedding(self.actions, self.embed_dim, device=self.device)
+
         for idx, inode in enumerate(graph.Inodes.values()):
             inode.embedding = self.inode_embed_table.weight[idx]
 
-        # Mask for invalid actions (WAIT is always allowed)
         self.base_mask = full((self.actions + 1,), -float('inf'), device=self.device, requires_grad=False)
 
     def update_state(self, graph: TripartiteGraph, node: varNode):
-        action_features = [] # (num_actions+1, embed_dim + aux_dim)
+        graph_state = graph.get_state(node)
 
-        # Features for INodes only
-        candidate_set = set(node.candidate_Inodes)
-        for idx, inode_id in enumerate(self.action_map):
-            inode = graph.Inodes[inode_id]
-            left_cnt = len(graph.left_memory[inode_id]) if inode.available else -1.0
-            right_cnt = len(graph.right_memory[inode_id]) if inode.available else -1.0
-            
-            aux = as_tensor([float(0.0 if node.node_type == 'L' else 1.0), 
-                            float(node.online_time),
-                            float(1.0 if inode_id in candidate_set else 0.0),
-                            float(left_cnt), 
-                            float(right_cnt), 
-                            float(inode.state)], 
-                            device=self.device)
-            action_features.append(cat([inode.embedding, aux]))
+        inode_feat = as_tensor(graph_state['inode'], device=self.device)    # (N,6)
+        inode_embed = self.inode_encoder(inode_feat)
+        agg_inode_embed = self.inode_embed_table.weight + self.tanh(self.inode_gamma * inode_embed)
 
-        # Wait action
-        action_features.append(cat([self.wait_embed, self.wait_aux.to(self.device)]))
+        edge_feat = as_tensor(graph_state['edge'], device=self.device)     # (N,4)
+        aux = cat([edge_feat[:, :3], inode_feat[:, 2:]], dim=1)
+        action_features = cat([agg_inode_embed, aux], dim=1)
 
-        # Stack: (seq_len, in_channels) -> (1, in_channels, seq_len) for Conv1d
-        x = stack(action_features, dim=0).unsqueeze(0).permute(0, 2, 1)  # (1, C, L)
+        x = cat([action_features, self.wait_token], dim=0)
+        x = x.unsqueeze(0).permute(0, 2, 1)
 
-        # Apply 1D convolutions -> (1, 1, L)
-        scores = self.conv_net(x).squeeze(0).squeeze(0)  # (L,)
+        scores = self.conv_net(x).squeeze(0).squeeze(0)
         return scores
 
     def _get_inode_scores(self, graph: TripartiteGraph, node: varNode):
         scores = self.update_state(graph, node)
 
         mask = self.base_mask.clone()
+
         candidate_set = set(node.candidate_Inodes)
         for idx, inode_id in enumerate(self.action_map):
             inode = graph.Inodes[inode_id]
             if inode.available and inode_id in candidate_set:
                 mask[idx] = 0.0
-        mask[self.actions] = 0.0  # WAIT always valid
+        mask[self.actions] = 0.0
 
         scores = scores + mask
         return scores
 
 class TimeSeriesStrategy(BaseAIStrategy):
     def __init__(self,
-            hidden_dim= 64,
-            embed_dim= 32,
-            state_dim= 32,
-            steps= 50,
-            device= DEVICE,
-            name= "TimeSeriesStrategy") -> None:
+            hidden_dim=64,
+            embed_dim=32,
+            state_dim=32,
+            steps=50,
+            device=DEVICE,
+            name="TimeSeriesStrategy"):
         super().__init__(name, True, True)
 
         self.state_dim = state_dim
         self.hidden_dim = hidden_dim
         self.embed_dim = embed_dim
-
         self.device = device
 
-        self.inode_embed_table: nn.Embedding = None # type: ignore
-        self.base_mask: Tensor = None               # type: ignore
-        self.global_state: Tensor = None            # type: ignore
+        self.inode_embed_table: nn.Embedding = None     # type: ignore
+        self.action_embed: Tensor = None                # type: ignore
+        self.base_mask: Tensor = None                   # type: ignore
+        self.global_state: Tensor = None                # type: ignore
 
-        # BPTT
         self.BPTT_steps = steps
         self.step_counter = 0
 
         self.edge_encoder = nn.Sequential(
-            nn.Linear(3 + 3, self.hidden_dim),
-            nn.LayerNorm(self.hidden_dim),
+            nn.Linear(4, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.ReLU(),
-
-            nn.Linear(self.hidden_dim, self.embed_dim),
+            nn.Linear(hidden_dim, embed_dim),
         )
 
-        # State and Embedding conversions
-        self.state_to_embed = nn.Linear(self.state_dim, self.embed_dim, bias= False)
-        self.embed_to_state = nn.Linear(self.embed_dim, self.state_dim, bias= False)
+        # Global Projection layer
+        self.global_projection = nn.Sequential(
+            nn.Linear(4, self.embed_dim),
+            nn.LayerNorm(self.embed_dim),
+            nn.ReLU()
+        )
+
+        self.state_to_embed = nn.Linear(state_dim, embed_dim, bias=False)
+        self.embed_to_state = nn.Linear(embed_dim, state_dim, bias=False)
 
         self.state_mask = nn.Sequential(
-            nn.LayerNorm(self.embed_dim),
+            nn.LayerNorm(embed_dim),
             nn.Sigmoid(),
-            nn.Linear(self.embed_dim, self.state_dim),
+            nn.Linear(embed_dim, state_dim),
         )
 
         self.query_net = nn.Sequential(
-            nn.Linear(2 * self.embed_dim, self.hidden_dim),
-            nn.LayerNorm(self.hidden_dim),
+            nn.Linear(2 * embed_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.SiLU(),
-
-            nn.Linear(self.hidden_dim, self.embed_dim)
+            nn.Linear(hidden_dim, embed_dim)
         )
 
-        # WAIT token (learnable)
         self.wait_token = nn.Parameter(zeros(embed_dim))
 
     def process_graph(self, graph: TripartiteGraph):
@@ -464,69 +457,140 @@ class TimeSeriesStrategy(BaseAIStrategy):
         for idx, inode in enumerate(graph.Inodes.values()):
             inode.embedding = self.inode_embed_table.weight[idx]
 
-        inode_embeds = self.inode_embed_table.weight
-        self.action_embed = cat([inode_embeds, self.wait_token.unsqueeze(0)], dim=0)
+        inode_embed = self.inode_embed_table.weight
+        self.action_embed = cat([inode_embed, self.wait_token.unsqueeze(0)], dim=0)
 
         self.base_mask = full((self.actions + 1,), -float('inf'), device=self.device, requires_grad=False)
 
-    def update_state(self, graph: TripartiteGraph, node: varNode) -> tuple[Tensor, Tensor]:
-        edge_feature = []
+    def update_state(self, graph: TripartiteGraph, node: varNode):
+        graph_state = graph.get_state(node)
 
-        for inode_id in node.candidate_Inodes:
-            inode = graph.Inodes[inode_id]
-            left_cnt = len(graph.left_memory[inode_id]) if inode.available else -1
-            right_cnt = len(graph.right_memory[inode_id]) if inode.available else -1
-            edge_feature.append([
-                0.0 if node.node_type == 'L' else 1.0,
-                float(node.online_time),
-                float(len(node.candidate_Inodes)),
-                float(left_cnt),
-                float(right_cnt),
-                float(inode.state),
-            ])
-        feat_tensor = as_tensor(edge_feature, device=self.device)   # ONE tensor
-        edge_embeddings = self.edge_encoder(feat_tensor)            # BATCHED
+        edge_feat = as_tensor(graph_state['edge'], device=self.device)
+        global_feat = as_tensor(graph_state['global'], device=self.device)       # (4,)
 
-        edge_t = edge_embeddings.mean(dim=0)
-        
-        # Memory for context
-        h_t = edge_t + self.state_to_embed(self.global_state)
+        global_proj = self.global_projection(global_feat)
+
+        edge_embed = self.edge_encoder(edge_feat)
+        edge_t = edge_embed.mean(dim=0)
+
+        h_t = edge_t + self.state_to_embed(self.global_state) + global_proj
         self.global_state = self.state_mask(h_t) * self.global_state + self.embed_to_state(h_t)
 
-        # --- BPTT truncation ---
         self.step_counter += 1
         if self.step_counter > self.BPTT_steps:
             self.global_state = self.global_state.detach()
             self.step_counter = 0
 
         graph.embedding = self.global_state.detach()
+
         return edge_t, h_t
-    
+
     def _get_inode_scores(self, graph: TripartiteGraph, node: varNode):
         edge_t, h_t = self.update_state(graph, node)
 
-        # Build query
         query = self.query_net(cat([edge_t, h_t]))
 
-        # Mask invalid actions
         mask = self.base_mask.clone()
-        mask.fill_(-float('inf'))
-        
+
         candidate_set = set(node.candidate_Inodes)
         for idx, inode_id in enumerate(self.action_map):
             inode = graph.Inodes[inode_id]
             if inode.available and inode_id in candidate_set:
                 mask[idx] = 0.0
-        # WAIT always valid
         mask[self.actions] = 0.0
 
         scores = (self.action_embed * query.unsqueeze(0)).sum(dim=1)
         scores = scores + mask
-
+        
         return scores
 
     def reset(self, graph: TripartiteGraph):
         self.global_state = zeros(self.state_dim, device=self.device)
         self.step_counter = 0
-
         graph.embedding = self.global_state.detach()
+
+class TransformerStrategy(BaseAIStrategy):
+    def __init__(self,
+                 hidden_dim=64,
+                 embed_dim=32,
+                 num_heads=4,
+                 num_layers=2,
+                 device=DEVICE,
+                 name="TransformerStrategy"):
+        super().__init__(name, True, False)
+
+        self.hidden_dim = hidden_dim
+        self.embed_dim = embed_dim
+        self.device = device
+
+        self.inode_embed_table: nn.Embedding = None          # type: ignore
+        self.base_mask: Tensor = None                        # type: ignore
+
+        self.input_proj = nn.Linear(10, embed_dim)
+
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim,
+            nhead=num_heads,
+            dim_feedforward=hidden_dim,
+            batch_first=True
+        )
+
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+
+        self.global_projection = nn.Linear(4, embed_dim)
+
+        self.query_net = nn.Sequential(
+            nn.Linear(embed_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, embed_dim)
+        )
+
+        self.wait_token = nn.Parameter(zeros(embed_dim))
+
+    def process_graph(self, graph: TripartiteGraph):
+        self.actions = len(graph.Inodes)
+        self.action_map = tuple(graph.Inodes)
+
+        self.inode_embed_table = nn.Embedding(self.actions, self.embed_dim, device=self.device)
+
+        for idx, inode in enumerate(graph.Inodes.values()):
+            inode.embedding = self.inode_embed_table.weight[idx]
+
+        self.base_mask = full((self.actions + 1,), -float('inf'), device=self.device, requires_grad=False)
+
+    def update_state(self, graph: TripartiteGraph, node: varNode):
+        graph_state = graph.get_state(node)
+
+        inode = as_tensor(graph_state['inode'], device=self.device)   # (N,6)
+        edge = as_tensor(graph_state['edge'], device=self.device)     # (N,4)
+        global_f = as_tensor(graph_state['global'], device=self.device)
+
+        x = cat([inode, edge], dim=1)             # (N,10)
+        x = self.input_proj(x).unsqueeze(0)       # (1,N,E)
+
+        x = self.transformer(x).squeeze(0)        # (N,E)
+
+        context = x.mean(dim=0)
+        global_proj = self.global_projection(global_f)
+
+        return context, x, global_proj
+
+    def _get_inode_scores(self, graph: TripartiteGraph, node: varNode):
+        context, inode_embed, global_proj = self.update_state(graph, node)
+
+        query = self.query_net(context + global_proj)
+
+        action_embed = cat([inode_embed, self.wait_token.unsqueeze(0)], dim=0)
+
+        mask = self.base_mask.clone()
+        candidate_set = set(node.candidate_Inodes)
+
+        for idx, inode_id in enumerate(self.action_map):
+            inode = graph.Inodes[inode_id]
+            if inode.available and inode_id in candidate_set:
+                mask[idx] = 0.0
+
+        mask[self.actions] = 0.0
+
+        scores = (action_embed * query.unsqueeze(0)).sum(dim=1)
+        return scores + mask

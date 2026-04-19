@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 import matplotlib.pyplot as plt
 
@@ -41,6 +41,12 @@ from tqdm.auto import tqdm
 
 from abc import ABC, abstractmethod
 
+# Value Nets
+# TODO: For PPO / A2C
+class ValueNet(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+
 # RL Policies
 class BaseRLPolicy(ABC):
     def __init__(self) -> None:
@@ -67,7 +73,7 @@ class BaseRLPolicy(ABC):
         if len(self.rewards) > 0:
             self.rewards[-1] += graph.matches
 
-    def compute_reward(self, graph: TripartiteGraph, node: varNode, inode: INode):
+    def compute_reward(self, graph: TripartiteGraph, node: varNode, inode: INode|None) -> float:
         reward = 0.0
 
         # ---- INVALID ACTION ----
@@ -78,7 +84,6 @@ class BaseRLPolicy(ABC):
             else:
                 reward += 0.5  # correct WAIT
             return reward
-
 
         # ---- MATCH POTENTIAL ----
         if node.node_type == 'L':
@@ -96,7 +101,6 @@ class BaseRLPolicy(ABC):
         reward -= 0.05 * degree  # discourage overuse
 
         return reward
-
 # ---------------- VanillaPolicy ---------------- #
 
 class VanillaPolicyGradient(BaseRLPolicy):
@@ -127,17 +131,14 @@ class VanillaPolicyGradient(BaseRLPolicy):
         entropy_loss = -self.entropy_beta * entropies.sum()
 
         return policy_loss + entropy_loss
-
 # ---------------- A2C ---------------- #
 
 class A2CPolicy(VanillaPolicyGradient):
-    def __init__(self, gamma=0.99, entropy_beta=0.01, value_beta=0.5, device=DEVICE):
+    def __init__(self, value_net: ValueNet, gamma=0.99, entropy_beta=0.01, value_beta=0.5, device=DEVICE):
         super().__init__(gamma, entropy_beta, device)
 
         self.value_beta = value_beta
-        self.value_net = nn.Sequential(
-
-        )
+        self.value_net = value_net
         self.values = []
 
     def reset_episode(self):
@@ -160,7 +161,7 @@ class A2CPolicy(VanillaPolicyGradient):
         return policy_loss + self.value_beta * value_loss + entropy_loss
 
     def compute_reward(self, graph: TripartiteGraph, node: varNode, inode: INode):
-        state = ...
+        state = graph.get_state(node)
         value = self.value_net(state)
         self.values.append(value)
 
@@ -168,13 +169,10 @@ class A2CPolicy(VanillaPolicyGradient):
 # ---------------- PPO ---------------- #
 
 class PPOPolicy(A2CPolicy):
-    def __init__(self, gamma=0.99, clip_eps=0.2, entropy_beta=0.01, value_beta=0.5, device=DEVICE):
-        super().__init__(gamma, entropy_beta, value_beta, device)
+    def __init__(self, value_net: ValueNet, gamma=0.99, clip_eps=0.2, entropy_beta=0.01, value_beta=0.5, device=DEVICE):
+        super().__init__(value_net, gamma, entropy_beta, value_beta, device)
 
         self.clip_eps = clip_eps
-        self.value_net = nn.Sequential(
-
-        )
         self.old_log_probs = []
 
     def reset_episode(self):
@@ -243,6 +241,9 @@ class TripartiteGraphTrainer:
         self.beta_threshold = beta_threshold
         self.beta_decay_func = beta_decay_func
 
+        # For RL basedTraining
+        self.rl_policy: BaseRLPolicy = None                     # type: ignore
+
     def set_teacher(self, teacher:MatchingStrategy | BaseAIStrategy):
         self.teacher = teacher
 
@@ -259,6 +260,9 @@ class TripartiteGraphTrainer:
         self.student_graph = TripartiteGraph(student, self.n_inodes)
         self.student_inode_ids = tuple(self.student_graph.Inodes)
         self.student_id_to_idx = {id_: i for i, id_ in enumerate(self.student_inode_ids)}
+
+    def set_rl_policy(self, rl_policy: BaseRLPolicy):
+        self.rl_policy = rl_policy
 
     def _candidates_mapping(self, candidates, graph_inode_ids):
         inode_ids = [graph_inode_ids[candidate_id] for candidate_id in candidates]
@@ -405,7 +409,7 @@ class TripartiteGraphTrainer:
 
         print("Training done")
 
-    def step_rl(self, node_type, time, candidates, rl_policy):
+    def step_rl(self, node_type, time, candidates):
         # ---- Create node ----
         s_node = self.student_graph.add_node(
             time,
@@ -430,14 +434,14 @@ class TripartiteGraphTrainer:
         self._apply_action(self.student_graph, self.student, s_node, chosen_inode)
 
         # ---- Compute reward ----
-        reward = rl_policy.compute_reward(self.student_graph, s_node, chosen_inode)
+        reward = self.rl_policy.compute_reward(self.student_graph, s_node, chosen_inode)
 
         # ---- Store trajectory ----
-        rl_policy.store_step(log_prob, reward, entropy)
+        self.rl_policy.store_step(log_prob, reward, entropy)
 
         return reward
 
-    def train_rl(self, rl_policy: BaseRLPolicy, node_order, epochs=10,
+    def train_rl(self, node_order, epochs=10,
                 save_model=False, save_dir=SAVE_DIR, verbose=True):
         os.makedirs(save_dir, exist_ok=True)
 
@@ -453,17 +457,16 @@ class TripartiteGraphTrainer:
             RND_GEN.shuffle(node_order)
 
             self.optimizer.zero_grad()
-            rl_policy.reset_episode()
+            self.rl_policy.reset_episode()
 
             pbar = tqdm(enumerate(node_order), desc=f"Epoch {epoch + 1}", total=n, disable=not verbose)
             for time, (node_type, candidates) in pbar:
-                reward = self.step_rl(node_type, time, candidates, rl_policy)
+                reward = self.step_rl(node_type, time, candidates)
                 total_reward += reward
 
-            rl_policy.finish_episode(self.student_graph)
-
-            # ---- Compute RL loss ----
-            loss = rl_policy.compute_loss()
+            # ---- Compute Reward & RL loss ----
+            self.rl_policy.finish_episode(self.student_graph)
+            loss = self.rl_policy.compute_loss()
 
             # ---- Backprop ----
             loss.backward()

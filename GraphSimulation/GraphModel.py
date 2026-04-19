@@ -154,8 +154,8 @@ class TripartiteGraph(Entity):
             edge_features.append([
                 float(0.0 if node.node_type == 'L' else 1.0),
                 float(node.online_time),
-                float(len(node.candidate_Inodes)),
                 float(1.0 if inode_id in candidate_set else 0.0),
+                float(len(node.candidate_Inodes)),
             ])
 
         # ---- GLOBAL FEATURES ----
