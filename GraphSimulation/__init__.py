@@ -1,4 +1,3 @@
-
 from .Nodes import (
     NODE_TYPE,
     LNode, INode, RNode
@@ -12,7 +11,9 @@ from .GraphStrategy import (
 )
 
 from .GraphAIStrategy import (
-    SupervisedStrategy,
+    MLPStrategy,
+    ResidualMLPStrategy,
+    CNNStrategy,
     TimeSeriesStrategy
 )
 
@@ -35,7 +36,9 @@ __all__ = [
 
     "TripartiteGraphTrainer",
 
-    "SupervisedStrategy",
+    "MLPStrategy",
+    "ResidualMLPStrategy",
+    "CNNStrategy",
     "TimeSeriesStrategy",
     
     "TripartiteGraph",

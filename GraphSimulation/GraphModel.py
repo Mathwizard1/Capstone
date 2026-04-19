@@ -77,6 +77,9 @@ class TripartiteGraph(Entity):
         inode = self.strategy.select_inode_for_R(self, rnode)
 
         if inode:
+            # At least a pair has been made
+            inode.waiting()
+
             partner = self.strategy.select_partner(self, self.left_memory[inode.id])
             if partner: 
                 self.match(partner, inode, rnode) # type: ignore
@@ -90,7 +93,7 @@ class TripartiteGraph(Entity):
         rnode.connected_Inode = inode
 
         inode.connection = (lnode, rnode)
-        inode.available = False
+        inode.offline()
 
         self.matches += 1
 
@@ -127,5 +130,49 @@ class TripartiteGraph(Entity):
 
         # Reinitialize strategy-specific state
         self.strategy.reset(self)
+
+    def get_state(self, node: varNode):
+        inode_features = []
+        edge_features = []
+
+        candidate_set = set(node.candidate_Inodes)
+        for inode_id, inode in self.Inodes.items():
+            left_cnt = len(self.left_memory[inode_id]) if inode.available else -1.0
+            right_cnt = len(self.right_memory[inode_id]) if inode.available else -1.0
+
+            # ---- INODE FEATURES (global order-invariant) ----
+            inode_features.append([
+                float(inode.available),
+                float(inode.state),
+                float(left_cnt),
+                float(right_cnt),
+                float(left_cnt - right_cnt),   # imbalance
+                float(left_cnt + right_cnt),   # congestion
+            ])
+
+            # ---- EDGE FEATURES ----
+            edge_features.append([
+                float(0.0 if node.node_type == 'L' else 1.0),
+                float(node.online_time),
+                float(len(node.candidate_Inodes)),
+                float(1.0 if inode_id in candidate_set else 0.0),
+            ])
+
+        # ---- GLOBAL FEATURES ----
+        total_left = sum(len(v) for v in self.left_memory.values())
+        total_right = sum(len(v) for v in self.right_memory.values())
+
+        global_features = [
+            float(self.matches),
+            float(total_left),
+            float(total_right),
+            float(total_left - total_right),  # global imbalance
+        ]
+
+        return {
+            "inode": inode_features,
+            "edge": edge_features,
+            "global": global_features
+        }
 
 from .GraphStrategy import MatchingStrategy

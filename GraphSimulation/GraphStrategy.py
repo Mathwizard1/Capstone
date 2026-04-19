@@ -9,6 +9,13 @@ from .Nodes import (
 
 from .utils import RND_GEN
 
+from numpy import (
+    ndarray,
+    array,
+
+    exp,
+)
+
 # Matching Strategy Class
 
 class MatchingStrategy(ABC):
@@ -16,16 +23,11 @@ class MatchingStrategy(ABC):
         self.name = name
         self.deterministic_partner = deterministic_partner
 
+    @abstractmethod
+    def _get_inode_scores(self, graph: TripartiteGraph, node: varNode) -> ndarray: ...
+
     def process_graph(self, graph: TripartiteGraph): 
         pass
-
-    def select_inode_sub_optimal(self, graph: TripartiteGraph, inode_ids: tuple[int, ...]) -> INode | None:
-        # Sub Optimal
-        for inode_id in inode_ids:
-            inode = graph.Inodes[inode_id]
-            if inode.available:
-                return inode
-        return None
 
     @abstractmethod
     def select_inode_for_L(self, graph: TripartiteGraph, lnode: LNode) -> INode | None: ...
@@ -44,6 +46,27 @@ class MatchingStrategy(ABC):
 class RandomStrategy(MatchingStrategy):
     def __init__(self, name="RandomStrategy", deterministic_partner=False) -> None:
         super().__init__(name, deterministic_partner)
+
+    def _get_inode_scores(self, graph: TripartiteGraph, node: varNode) -> ndarray:
+        inode_scores = []
+
+        has_valid = False
+        candidate_set = set(node.candidate_Inodes)
+        for inode_id in graph.Inodes:
+            inode = graph.Inodes[inode_id]
+            valid = inode.available and (inode_id in candidate_set)
+
+            if valid:
+                inode_scores.append(1.0)
+                has_valid = True
+            else:
+                inode_scores.append(0.0)
+
+        # WAIT action
+        inode_scores.append(0.0 if has_valid else 1.0)
+
+        scores = array(inode_scores, dtype=float)
+        return scores
 
     def _get_random_available_inode(self, graph: TripartiteGraph, node: varNode) -> INode | None:
         available_candidates = []
@@ -79,6 +102,28 @@ class GreedyStrategy(MatchingStrategy):
     def __init__(self, name="GreedyStrategy",) -> None:
         super().__init__(name, True)
 
+    def _get_inode_scores(self, graph: TripartiteGraph, node: varNode) -> ndarray:
+        inode= None
+
+        for inode_id in node.candidate_Inodes:
+            inode= graph.Inodes[inode_id]
+            if(inode.available): 
+                break
+
+        inode_scores = list([0.0] * len(graph.Inodes))
+
+        # WAIT action
+        if(inode):
+            inode_idx = tuple(graph.Inodes.keys()).index(inode.id)
+
+            inode_scores[inode_idx] = 1.0
+            inode_scores.append(0.0)
+        else:
+            inode_scores.append(1.0)
+
+        scores = array(inode_scores, dtype=float)
+        return scores
+
     def select_inode_for_L(self, graph, lnode):
         # Optimal with R connected
         for inode_id in lnode.candidate_Inodes:
@@ -98,6 +143,68 @@ class GreedyStrategy(MatchingStrategy):
 class RankStrategy(MatchingStrategy):
     def __init__(self, name= "RankStrategy", deterministic_partner= False) -> None:
         super().__init__(name, deterministic_partner)
+
+    def _get_inode_scores(self, graph: TripartiteGraph, node: varNode) -> ndarray:
+        inode_scores = []
+
+        candidate_ids = [
+            inode_id for inode_id in node.candidate_Inodes
+            if graph.Inodes[inode_id].available
+        ]
+
+        # Case 4: no available neighbors → WAIT
+        if not candidate_ids:
+            scores = [0.0 for _ in graph.Inodes]
+            scores.append(1.0)
+            return array(scores, dtype=float)
+
+        # ---- lo2 (lowest ranked neighbor) ----
+        lo2_id = min(candidate_ids, key=lambda i: graph.Inodes[i].rank)
+        lo2_rank = graph.Inodes[lo2_id].rank
+
+        # ---- check opposite-side ----
+        if node.node_type == 'L':
+            lo2_has_opposite = len(graph.right_memory[lo2_id]) > 0
+        else:
+            lo2_has_opposite = len(graph.left_memory[lo2_id]) > 0
+
+        # ---- compute scores ----
+        candidate_set = set(node.candidate_Inodes)
+        for inode_id in graph.Inodes:
+            inode = graph.Inodes[inode_id]
+
+            # Invalid nodes
+            if not inode.available or (inode_id not in candidate_set):
+                inode_scores.append(0.0)
+                continue
+
+            if lo2_has_opposite:
+                # Case 2: ε = 0, only lo2 is valid
+                if inode_id == lo2_id:
+                    score = exp(inode.rank - 1.0)
+                else:
+                    score = 0.0
+            else:
+                # Case 3 or Case 1
+                if ((node.node_type == 'L' and graph.right_memory[inode_id]) or 
+                    (node.node_type == 'R' and graph.left_memory[inode_id])):
+                    # eligible alternative (like lo2.5)
+                    score = exp(lo2_rank - 1.0)
+                else:
+                    # no opposite edge → cannot match
+                    score = 0.0
+
+            inode_scores.append(score)
+
+        # ---- WAIT handling ----
+        if sum(inode_scores) == 0:
+            # Case 1: no matching possible → WAIT
+            inode_scores.append(1.0)
+        else:
+            inode_scores.append(0.0)
+
+        scores = array(inode_scores, dtype=float)
+        return scores
 
     def process_graph(self, graph):
         for inode in graph.Inodes.values():

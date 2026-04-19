@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from typing import Literal
+
 import matplotlib.pyplot as plt
-from numpy import exp, clip
+
+from numpy import (array, exp)
 
 from GraphSimulation.GraphModel import TripartiteGraph
+from GraphSimulation.utils import DEVICE
 
 from .Nodes import (
     varNode,
@@ -18,8 +22,12 @@ from torch import (
 
     Tensor,
     tensor,
+    as_tensor,
 
+    stack,
     long,
+
+    min,
 )
 
 import os
@@ -27,44 +35,230 @@ import os
 import torch.optim as optim
 import torch.nn as nn
 
-from .utils import RND_GEN, DEVICE, DTYPE
+from .utils import RND_GEN, DEVICE, DTYPE, EPS
 
 from tqdm.auto import tqdm
+
+from abc import ABC, abstractmethod
+
+# RL Policies
+class BaseRLPolicy(ABC):
+    def __init__(self) -> None:
+        super().__init__()
+
+        self.log_probs = []
+        self.rewards = []
+        self.entropies = []
+
+    @abstractmethod
+    def compute_loss(self) -> Tensor: ...
+
+    def reset_episode(self):
+        self.log_probs.clear()
+        self.rewards.clear()
+        self.entropies.clear()
+
+    def store_step(self, log_prob, reward, entropy):
+        self.log_probs.append(log_prob)
+        self.rewards.append(reward)
+        self.entropies.append(entropy)
+    
+    def finish_episode(self, graph: TripartiteGraph):
+        if len(self.rewards) > 0:
+            self.rewards[-1] += graph.matches
+
+    def compute_reward(self, graph: TripartiteGraph, node: varNode, inode: INode):
+        reward = 0.0
+
+        # ---- INVALID ACTION ----
+        if inode is None:
+            # WAIT penalty if valid actions exist
+            if any(graph.Inodes[i].available for i in node.candidate_Inodes):
+                reward -= 0.75
+            else:
+                reward += 0.5  # correct WAIT
+            return reward
+
+
+        # ---- MATCH POTENTIAL ----
+        if node.node_type == 'L':
+            partners = graph.right_memory[inode.id]
+        else:
+            partners = graph.left_memory[inode.id]
+
+        if partners:
+            reward += 2.5  # successful match opportunity
+        else:
+            reward += 1.0  # valid but not useful yet
+
+        # ---- LOAD BALANCING ----
+        degree = len(graph.left_memory[inode.id]) + len(graph.right_memory[inode.id])
+        reward -= 0.05 * degree  # discourage overuse
+
+        return reward
+
+# ---------------- VanillaPolicy ---------------- #
+
+class VanillaPolicyGradient(BaseRLPolicy):
+    def __init__(self, gamma=0.99, entropy_beta=0.01, device=DEVICE):
+        super().__init__()
+
+        self.gamma = gamma
+        self.entropy_beta = entropy_beta
+        self.device = device
+
+    def _compute_returns(self):
+        returns = []
+        G = 0.0
+        for r in reversed(self.rewards):
+            G = r + self.gamma * G
+            returns.insert(0, G)
+
+        return as_tensor(returns, device=self.device, dtype=DTYPE)
+
+    def compute_loss(self):
+        returns = self._compute_returns()
+        returns = (returns - returns.mean()) / (returns.std() + EPS)
+
+        log_probs = stack(self.log_probs)
+        entropies = stack(self.entropies)
+
+        policy_loss = -(log_probs * returns).sum()
+        entropy_loss = -self.entropy_beta * entropies.sum()
+
+        return policy_loss + entropy_loss
+
+# ---------------- A2C ---------------- #
+
+class A2CPolicy(VanillaPolicyGradient):
+    def __init__(self, gamma=0.99, entropy_beta=0.01, value_beta=0.5, device=DEVICE):
+        super().__init__(gamma, entropy_beta, device)
+
+        self.value_beta = value_beta
+        self.value_net = nn.Sequential(
+
+        )
+        self.values = []
+
+    def reset_episode(self):
+        self.values.clear()
+        super().reset_episode()
+
+    def compute_loss(self):
+        returns = self._compute_returns()
+
+        values = stack(self.values).squeeze()
+        log_probs = stack(self.log_probs)
+        entropies = stack(self.entropies)
+
+        advantages = returns - values.detach()
+
+        policy_loss = -(log_probs * advantages).sum()
+        value_loss = ((returns - values) ** 2).sum()
+        entropy_loss = -self.entropy_beta * entropies.sum()
+
+        return policy_loss + self.value_beta * value_loss + entropy_loss
+
+    def compute_reward(self, graph: TripartiteGraph, node: varNode, inode: INode):
+        state = ...
+        value = self.value_net(state)
+        self.values.append(value)
+
+        return super().compute_reward(graph, node, inode)
+# ---------------- PPO ---------------- #
+
+class PPOPolicy(A2CPolicy):
+    def __init__(self, gamma=0.99, clip_eps=0.2, entropy_beta=0.01, value_beta=0.5, device=DEVICE):
+        super().__init__(gamma, entropy_beta, value_beta, device)
+
+        self.clip_eps = clip_eps
+        self.value_net = nn.Sequential(
+
+        )
+        self.old_log_probs = []
+
+    def reset_episode(self):
+        self.old_log_probs.clear()
+        super().reset_episode()
+
+    def store_step(self, log_prob, reward, entropy):
+        self.old_log_probs.append(log_prob.detach())
+        super().store_step(log_prob, reward, entropy)
+
+    def compute_loss(self):
+        returns = self._compute_returns()
+
+        values = stack(self.values).squeeze()
+        log_probs = stack(self.log_probs)
+        old_log_probs = stack(self.old_log_probs)
+        entropies = stack(self.entropies)
+
+        advantages = returns - values.detach()
+
+        ratios = (log_probs - old_log_probs).exp()
+
+        surr1 = ratios * advantages
+        surr2 = ratios.clamp(1 - self.clip_eps, 1 + self.clip_eps) * advantages
+
+        policy_loss = min(surr1, surr2).sum()
+        value_loss = ((returns - values) ** 2).sum()
+        entropy_loss = -self.entropy_beta * entropies.sum()
+
+        return policy_loss + self.value_beta * value_loss + entropy_loss
+
+# GraphTrainer Class
 
 class TripartiteGraphTrainer:
     def __init__(
         self,
-        teacher: MatchingStrategy | BaseAIStrategy,
-        student: BaseAIStrategy,
-        n_inodes: int,
-        optimizer: optim.Optimizer,
+        n_Inodes: int,
         criterion: nn.Module,
         device=DEVICE,
 
-        beta_decay= 0.5,
-        beta_threshold= 0.45,
+        beta_decay= 5e-2,
+        beta_threshold= 0.6,
+        beta_decay_func: Literal['linear', 'exponential']= 'linear',
     ):
-        self.teacher = teacher
-        self.student = student
+        self.teacher: MatchingStrategy | BaseAIStrategy = None  # type: ignore
+        self.student: BaseAIStrategy = None                     # type: ignore
 
         # Two separate graphs
-        self.teacher_graph = TripartiteGraph(teacher, n_inodes)
-        self.student_graph = TripartiteGraph(student, n_inodes)
+        self.teacher_graph: TripartiteGraph = None              # type: ignore
+        self.student_graph: TripartiteGraph = None              # type: ignore
 
-        self.teacher_inode_ids = tuple(self.teacher_graph.Inodes)
-        self.student_inode_ids = tuple(self.student_graph.Inodes)
-        self.student_id_to_idx = {id_: i for i, id_ in enumerate(self.student_inode_ids)}
-        self.teacher_id_to_idx = {id_: i for i, id_ in enumerate(self.teacher_inode_ids)}
+        self.teacher_inode_ids = tuple()
+        self.student_inode_ids = tuple()
+        self.student_id_to_idx = {}
+        self.teacher_id_to_idx = {}
 
-        self.optimizer = optimizer
+        self.n_inodes = n_Inodes
+        self.optimizer: optim.Optimizer = None                  # type: ignore
         self.criterion = criterion
 
-        self.loss_data = ()
+        self.loss_data = {}
         self.device = device
 
-        self.beta = 1.0
+        self.beta = array(1.0)
         self.beta_decay = beta_decay
         self.beta_threshold = beta_threshold
+        self.beta_decay_func = beta_decay_func
+
+    def set_teacher(self, teacher:MatchingStrategy | BaseAIStrategy):
+        self.teacher = teacher
+
+        # graphs
+        self.teacher_graph = TripartiteGraph(teacher, self.n_inodes)
+        self.teacher_inode_ids = tuple(self.teacher_graph.Inodes)
+        self.teacher_id_to_idx = {id_: i for i, id_ in enumerate(self.teacher_inode_ids)}
+
+    def set_student(self, student:BaseAIStrategy, optimizer: optim.Optimizer):
+        self.student = student
+        self.optimizer = optimizer
+
+        # graphs
+        self.student_graph = TripartiteGraph(student, self.n_inodes)
+        self.student_inode_ids = tuple(self.student_graph.Inodes)
+        self.student_id_to_idx = {id_: i for i, id_ in enumerate(self.student_inode_ids)}
 
     def _candidates_mapping(self, candidates, graph_inode_ids):
         inode_ids = [graph_inode_ids[candidate_id] for candidate_id in candidates]
@@ -83,10 +277,12 @@ class TripartiteGraphTrainer:
                     graph.match(partner, inode, node) # type: ignore
 
     def _dagger_policy(self, teacher_inode: INode|None, student_inode:INode|None, step):
-        use_teacher = (RND_GEN.random() < self.beta)
-
-        self.beta = (self.beta * exp(-self.beta_decay * step)).clip(self.beta_threshold)
-
+        if(self.beta_decay_func == 'linear'):
+            beta = (self.beta - self.beta_decay * step).clip(self.beta_threshold)
+        else:
+            beta = (self.beta * exp(-self.beta_decay * step)).clip(self.beta_threshold)
+        
+        use_teacher = (RND_GEN.random() < beta)
         if use_teacher:
             exec_inode_teacher = teacher_inode
             if teacher_inode:
@@ -105,8 +301,8 @@ class TripartiteGraphTrainer:
                 exec_inode_teacher = None
         return exec_inode_teacher, exec_inode_student
 
-    def step_supervised(self, node_type, time, candidates) -> Tensor:
-        # Create SAME node in both graphs
+    def step_supervised(self, node_type, time, candidates, epoch) -> Tensor:
+        # ---- Create SAME node in both graphs ----
         t_node = self.teacher_graph.add_node(
             time,
             self._candidates_mapping(candidates, self.teacher_inode_ids),
@@ -119,79 +315,78 @@ class TripartiteGraphTrainer:
             node_type
         )
 
-        # ---- Teacher (label) ----
-        if node_type == "L":
-            teacher_inode = self.teacher.select_inode_for_L(self.teacher_graph, t_node)
+        # ---- Teacher scores (numpy or tensor → tensor) ----
+        teacher_scores = self.teacher._get_inode_scores(self.teacher_graph, t_node)
+
+        if not isinstance(teacher_scores, Tensor):
+            teacher_scores[teacher_scores == 0.0] = -float('inf')
+            teacher_scores = tensor(teacher_scores, device=self.device)
         else:
-            teacher_inode = self.teacher.select_inode_for_R(self.teacher_graph, t_node)
+            teacher_scores = teacher_scores.to(self.device)
 
-        # ---- Student (prediction) ----
-        scores = self.student.get_inode_scores(self.student_graph, s_node).unsqueeze(0)
+        teacher_scores = teacher_scores.unsqueeze(0).detach()
 
-        # ---- Map teacher → student index (for loss only) ----
-        if teacher_inode:
-            target_idx = self.teacher_id_to_idx[teacher_inode.id]
-        else:
-            target_idx = self.student.actions  # WAIT
+        # ---- Student scores ----
+        student_scores = self.student._get_inode_scores(self.student_graph, s_node)
+        student_scores = student_scores.unsqueeze(0)
 
-        # Loss Computed
-        target = tensor([target_idx], dtype=long, device=scores.device)
-        loss = self.criterion(scores, target)
+        # ---- Loss (distribution-based) ----
+        loss = self.criterion(student_scores, teacher_scores)
 
-        # ---- Student (Action) ----
-        student_action_idx = scores.softmax(dim=1).argmax(dim=1)
+        # ---- Deterministic actions (argmax) ----
+        teacher_idx = teacher_scores.argmax(dim=1)
+        student_idx = student_scores.detach().argmax(dim=1)
 
-        if student_action_idx == self.student.actions:
-            student_inode = None
-        else:
-            student_inode_id = self.student_inode_ids[student_action_idx]
-            student_inode = self.student_graph.Inodes[student_inode_id]
+        # ---- Map to inodes ----
+        teacher_inode = (None if teacher_idx == self.student.actions
+            else self.teacher_graph.Inodes[self.teacher_inode_ids[teacher_idx]]
+        )
 
-        # ---- DAgger mixing (execution policy) ----
-        exec_inode_teacher, exec_inode_student = self._dagger_policy(teacher_inode, student_inode, time)
+        student_inode = (None if student_idx == self.student.actions
+            else self.student_graph.Inodes[self.student_inode_ids[student_idx]]
+        )
 
-        # ---- Apply SAME decision to both graphs ----
+        # ---- DAgger policy ----
+        exec_inode_teacher, exec_inode_student = self._dagger_policy(teacher_inode, student_inode, epoch)
+
+        # ---- Apply decisions ----
         self._apply_action(self.teacher_graph, self.teacher, t_node, exec_inode_teacher)
         self._apply_action(self.student_graph, self.student, s_node, exec_inode_student)
 
         return loss
     
-    def train_supervised(self, node_order, epochs=10, accumulation_steps=10, 
+    def train_supervised(self, node_order, epochs=10, 
                         save_model=False, save_dir=SAVE_DIR, verbose=True):
         os.makedirs(save_dir, exist_ok=True)
-        best_loss = float('inf')
+
         loss_data = []
         n = len(node_order)
 
+        self.teacher_graph.reset()
+        self.student_graph.reset()
+
         for epoch in range(epochs):
             epoch_loss = 0.0
-            self.optimizer.zero_grad()
+            episode_loss = []
 
             self.student.train()
             RND_GEN.shuffle(node_order)
 
+            self.optimizer.zero_grad()
+
             pbar = tqdm(enumerate(node_order), desc=f"Epoch {epoch + 1}", total=len(node_order), disable= not verbose)
             for time, (node_type, candidates) in pbar:
-                loss = self.step_supervised(node_type, time, candidates)
+                loss = self.step_supervised(node_type, time, candidates, epoch)
 
                 epoch_loss += loss.item()
+                episode_loss.append(loss)
 
-                # Normalize loss for accumulation
-                loss = loss / accumulation_steps
-                loss.backward()
+            total_loss = stack(episode_loss).mean()
+            total_loss.backward()
 
-                # ---- UPDATE EVERY K STEPS ----
-                if (time + 1) % accumulation_steps == 0:
-                    nn.utils.clip_grad_norm_(self.student.parameters(), 1.25)
-
-                    self.optimizer.step()
-                    self.optimizer.zero_grad()
-
-            # ---- HANDLE REMAINDER ----
+            # ---- Backpropagation ----
             nn.utils.clip_grad_norm_(self.student.parameters(), 1.0)
-
             self.optimizer.step()
-            self.optimizer.zero_grad()
 
             avg_loss = epoch_loss / n
             loss_data.append(avg_loss)
@@ -199,22 +394,101 @@ class TripartiteGraphTrainer:
             if(verbose): pbar.write(f"Epoch {epoch + 1}: avg_loss: {avg_loss:.4f}")
             pbar.close()
 
-            if avg_loss < best_loss:
-                best_loss = avg_loss
-                if save_model:
-                    self.student.save(save_dir + f"/{self.student.name}_best.pth")
+            if save_model and (epoch % 20 == 0):
+                self.student.save(save_dir + f"/{self.student.name}_best.pth", verbose= verbose)
 
             self.teacher_graph.reset()
             self.student_graph.reset()
 
-        self.loss_data = tuple(loss_data)
+        self.loss_data[f"{self.teacher.name}->{self.student.name}"] = tuple(loss_data)
         self.student.save()
 
         print("Training done")
-        return loss_data
+
+    def step_rl(self, node_type, time, candidates, rl_policy):
+        # ---- Create node ----
+        s_node = self.student_graph.add_node(
+            time,
+            self._candidates_mapping(candidates, self.student_inode_ids),
+            node_type
+        )
+
+        # ---- Get scores ----
+        scores = self.student._get_inode_scores(self.student_graph, s_node)
+
+        # ---- Sample action ----
+        action, log_prob, entropy = self.student.sample_action(scores)
+
+        # ---- Map action to inode ----
+        if action == self.student.actions:
+            chosen_inode = None
+        else:
+            inode_id = self.student_inode_ids[action]
+            chosen_inode = self.student_graph.Inodes[inode_id]
+
+        # ---- Apply action ----
+        self._apply_action(self.student_graph, self.student, s_node, chosen_inode)
+
+        # ---- Compute reward ----
+        reward = rl_policy.compute_reward(self.student_graph, s_node, chosen_inode)
+
+        # ---- Store trajectory ----
+        rl_policy.store_step(log_prob, reward, entropy)
+
+        return reward
+
+    def train_rl(self, rl_policy: BaseRLPolicy, node_order, epochs=10,
+                save_model=False, save_dir=SAVE_DIR, verbose=True):
+        os.makedirs(save_dir, exist_ok=True)
+
+        reward_data = []
+        n = len(node_order)
+
+        self.student_graph.reset()
+
+        for epoch in range(epochs):
+            total_reward = 0.0
+
+            self.student.train()
+            RND_GEN.shuffle(node_order)
+
+            self.optimizer.zero_grad()
+            rl_policy.reset_episode()
+
+            pbar = tqdm(enumerate(node_order), desc=f"Epoch {epoch + 1}", total=n, disable=not verbose)
+            for time, (node_type, candidates) in pbar:
+                reward = self.step_rl(node_type, time, candidates, rl_policy)
+                total_reward += reward
+
+            rl_policy.finish_episode(self.student_graph)
+
+            # ---- Compute RL loss ----
+            loss = rl_policy.compute_loss()
+
+            # ---- Backprop ----
+            loss.backward()
+            nn.utils.clip_grad_norm_(self.student.parameters(), 1.0)
+            self.optimizer.step()
+
+            avg_reward = total_reward / n
+            reward_data.append(avg_reward)
+
+            if verbose: pbar.write(f"Epoch {epoch + 1}: avg_reward: {avg_reward:.4f}")
+            pbar.close()
+
+            if save_model and (epoch % 20 == 0):
+                self.student.save(save_dir + f"/{self.student.name}_rl.pth", verbose=verbose)
+
+            self.student_graph.reset()
+
+        self.loss_data[f"RL->{self.student.name}"] = tuple(reward_data)
+        self.student.save()
+
+        print("RL Training done")
 
     def plot_graph(self):
-        plt.plot(self.loss_data, label=f"{self.student.name}")
+        for key in self.loss_data:
+            plt.plot(self.loss_data[key], label=key)
 
         plt.title("Loss Data")
         plt.xlabel("epoch")

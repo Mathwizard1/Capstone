@@ -3,18 +3,20 @@ from __future__ import annotations
 from typing import Literal
 from itertools import count
 
+from enum import IntEnum
+
+from torch import Tensor
+
 NODE_TYPE = Literal['L', 'I', 'R']
 
 _Node_counter = count()
 def _get_next_id():
     return next(_Node_counter)
 
-from torch import Tensor
-
 class Entity:
     def __init__(self) -> None:
-        self.embedding: Tensor|None = None
-        self.weight: Tensor|None = None
+        self.embedding: Tensor = None # type: ignore
+        self.weight: Tensor= None # type: ignore
 
         self.rank = 0.0
 
@@ -63,15 +65,34 @@ class RNode(varNode):
         super().__init__(online_time, candidate_Inodes, 'R')
 
 class INode(Node):
+    class INode_state(IntEnum):
+        Offline = 0
+        Waiting = 1
+        Online = 2
+
     def __init__(self) -> None:
         super().__init__('I')
 
         self.connection: tuple[LNode, RNode] | None = None
-        self.available = True
+        self._available: INode.INode_state = self.INode_state.Online
+
+    @property
+    def state(self):
+        return self._available.value
+
+    @property
+    def available(self) -> bool:
+        return bool(self._available.value)
+
+    def waiting(self):
+        self._available = self.INode_state.Waiting
+
+    def offline(self):
+        self._available = self.INode_state.Offline
 
     def __str__(self) -> str:
         return f"INode(id:{self.id})\n"
-    
+
     def reset(self):
         self.connection = None
-        self.available = True
+        self._available: INode.INode_state = self.INode_state.Online
