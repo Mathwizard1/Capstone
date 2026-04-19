@@ -1,4 +1,4 @@
-import numpy.random as random
+import numpy
 
 from torch import (
     cuda,
@@ -7,7 +7,7 @@ from torch import (
 )
 
 SEED = 42
-RND_GEN = random.default_rng(SEED)
+RND_GEN = numpy.random.default_rng(SEED)
 
 LARGE_NUMBER = 1e9
 EPS = 1e-8

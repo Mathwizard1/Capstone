@@ -14,10 +14,17 @@ from .GraphAIStrategy import (
     MLPStrategy,
     ResidualMLPStrategy,
     CNNStrategy,
-    TimeSeriesStrategy
+    TimeSeriesStrategy,
+    TransformerStrategy
 )
 
 from .GraphAITrainer import (
+    ValueNet,
+
+    VanillaPolicyGradient,
+    A2CPolicy,
+    PPOPolicy,
+
     TripartiteGraphTrainer
 )
 
@@ -34,12 +41,19 @@ __all__ = [
     "GreedyStrategy", 
     "RankStrategy",
 
+    "ValueNet",
+
+    "VanillaPolicyGradient",
+    "A2CPolicy",
+    "PPOPolicy",
+
     "TripartiteGraphTrainer",
 
     "MLPStrategy",
     "ResidualMLPStrategy",
     "CNNStrategy",
     "TimeSeriesStrategy",
+    "TransformerStrategy",
     
     "TripartiteGraph",
 ]
