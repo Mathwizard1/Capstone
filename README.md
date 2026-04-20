@@ -5,7 +5,7 @@ This repository contains an experimentation study on using Artificial Intelligen
 ## 📖 Motivation
 
 The core motivation for this study comes from the research paper:
-**"Randomized RANKING Algorithm for Online Trichromatic Matching"** (included in the repository as `Randomized_-RANKING_Algorithm_for_Online_Trichromatic_Matching.pdf`).
+**"Randomized RANKING Algorithm for Online Trichromatic Matching"** (included in the repository as [Randomized_-RANKING_Algorithm_for_Online_Trichromatic_Matching.pdf](./Randomized_-RANKING_Algorithm_for_Online_Trichromatic_Matching.pdf)).
 
 While the paper provides theoretical foundations and randomized algorithms, this study extends the exploration into:
 - Deep Reinforcement Learning (DRL) approaches.
@@ -69,5 +69,5 @@ pip install torch numpy pandas networkx matplotlib seaborn tqdm
 
 ## 📈 Results and Visuals
 
-![SpatialReport](image.png)
-![SupervisedReport](trial_output.png)
+![SpatialReport](./SpatialReport.png)
+![SupervisedReport](./trial_output.png)
